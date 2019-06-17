@@ -1,18 +1,16 @@
-# glacier-upload hallgrimur1471's fork
-
-See the roadmap for planned work
+# glacier-upload - hallgrimur1471's fork
 
 ## Roadmap
 
-- [] Display progress when tarring
-- [] Add option to choose compression method
-- [] Add option to choose compression level
-- [] Verify upload & download don't use too much memory for big archives
-- [] Investigate if checking local checksum is also required for download
-- [] Introduce decompression to download script
-- [] Add option to choose archive retrieval speed
-- [] AWS SNS integration
-- [] Add more programmatical management/storage of Archive IDs
+- [ ] Display progress when tarring
+- [ ] Add option to choose compression method
+- [ ] Add option to choose compression level
+- [ ] Verify upload & download don't use too much memory for big archives
+- [ ] Investigate if checking local checksum is also required for download
+- [ ] Introduce decompression to download script
+- [ ] Add option to choose archive retrieval speed
+- [ ] AWS SNS integration
+- [ ] Add more programmatical management/storage of Archive IDs
 
 My plan is to hack on this in on branch 'hallgrimur1471' and then afterwards hopefully send pull requests from feature branches based on 'develop' branch to tbumi's repository.
 
