@@ -18,6 +18,7 @@ import binascii
 import concurrent.futures
 import hashlib
 import math
+import os
 import os.path
 import sys
 import tarfile
@@ -33,7 +34,7 @@ fileblock = threading.Lock()
 
 
 def upload(
-    vault_name, file_name, region, arc_desc, part_size, num_threads, upload_id
+    vault_name, file_names, region, arc_desc, part_size, num_threads, upload_id
 ):
     glacier = boto3.client("glacier", region)
 
@@ -44,17 +45,33 @@ def upload(
             "part-size must be more than 1 MB " "and less than 4096 MB"
         )
 
-    click.echo("Reading file...")
-    if len(file_name) > 1 or os.path.isdir(file_name[0]):
-        click.echo("Tarring file...")
+    if len(file_names) > 1 or os.path.isdir(file_names[0]):
         file_to_upload = tempfile.TemporaryFile()
         tar = tarfile.open(fileobj=file_to_upload, mode="w:xz")
-        for filename in file_name:
-            tar.add(filename)
+
+        click.echo("Compressing files...")
+        files_to_tar = list(file_names)
+        while files_to_tar:
+            file_name = files_to_tar.pop()
+            tarinfo = tar.gettarinfo(file_name)
+            click.echo(f"Compressing file {file_name}...")
+
+            if tarinfo.isreg():
+                with open(file_name, "rb") as file_obj:
+                    tar.addfile(tarinfo, file_obj)
+
+            elif tarinfo.isdir():
+                tar.addfile(tarinfo)
+                for sub_file in os.listdir(file_name):
+                    files_to_compress.append(sub_file)
+
+            else:
+                tarfile.addfile(tarinfo)
+
         tar.close()
-        click.echo("File tarred.")
+        click.echo("Files compressed to a tarfile.")
     else:
-        file_to_upload = open(file_name[0], mode="rb")
+        file_to_upload = open(file_names[0], mode="rb")
         click.echo("Opened single file.")
 
     part_size = part_size * 1024 * 1024
@@ -244,11 +261,11 @@ def upload(
     help="Optional upload id, if provided then will " "resume upload.",
 )
 def upload_command(
-    vault_name, file_name, region, arc_desc, part_size, num_threads, upload_id
+    vault_name, file_names, region, arc_desc, part_size, num_threads, upload_id
 ):
     return upload(
         vault_name,
-        file_name,
+        file_names,
         region,
         arc_desc,
         part_size,
