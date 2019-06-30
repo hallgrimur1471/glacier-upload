@@ -252,7 +252,10 @@ def compress_files(file_names: List[pathlib.Path]):
     click.echo(
         f"Compression complete. "
         f"Compressed {human_readable_bytes(total_bytes_to_compress)} "
-        f"to {human_readable_bytes(compressed_file_size)}"
+        f"to {human_readable_bytes(compressed_file_size)} "
+        + "(original size reduced to {:.2%})".format(
+            compressed_file_size / total_bytes_to_compress
+        )
     )
 
     return compressed_file

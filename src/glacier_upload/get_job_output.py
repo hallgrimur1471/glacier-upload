@@ -1,7 +1,15 @@
 import json
+import pathlib
+import tarfile
 
 import boto3
 import click
+
+
+def decompress_file(compressed_file: pathlib.Path, results_dir: pathlib.Path):
+    click.echo(f"Decompressing file {compressed_file} ...")
+    with tarfile.open(compressed_file) as tar:
+        tar.extractall(path=results_dir)
 
 
 def get_job_output(vault_name, job_id, file_name):
@@ -28,6 +36,10 @@ def get_job_output(vault_name, job_id, file_name):
             with open(file_name, "xb") as file:
                 file.write(response["body"].read())
 
+    file_name_path = pathlib.Path(file_name)
+    decompress_file(file_name_path, file_name_path.parent)
+    # TODO: delete compressed file
+
 
 @click.command()
 @click.option(
@@ -40,7 +52,7 @@ def get_job_output(vault_name, job_id, file_name):
 @click.option(
     "-f",
     "--file-name",
-    default="glacier_archive.tar.xz",
+    default="glacier_archive.tar.gz",
     help="File name of archive to be saved, "
     "if the job is an archive-retrieval",
 )
