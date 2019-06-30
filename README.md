@@ -2,7 +2,7 @@
 
 ## Roadmap
 
-- [ ] Display progress when tarring
+- [x] Display progress when compressing
 - [ ] Add option to choose compression method
 - [ ] Add option to choose compression level
 - [ ] Verify upload & download don't use too much memory for big archives

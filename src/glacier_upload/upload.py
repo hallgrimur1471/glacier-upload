@@ -24,6 +24,8 @@ import sys
 import tarfile
 import tempfile
 import threading
+import pathlib
+from typing import List
 
 import boto3
 import click
@@ -34,7 +36,13 @@ fileblock = threading.Lock()
 
 
 def upload(
-    vault_name, file_names, region, arc_desc, part_size, num_threads, upload_id
+    vault_name: str,
+    file_names: List[pathlib.Path],
+    region: str,
+    arc_desc: str,
+    part_size: int,
+    num_threads: int,
+    upload_id: str,
 ):
     glacier = boto3.client("glacier", region)
 
@@ -45,34 +53,7 @@ def upload(
             "part-size must be more than 1 MB " "and less than 4096 MB"
         )
 
-    if len(file_names) > 1 or os.path.isdir(file_names[0]):
-        file_to_upload = tempfile.TemporaryFile()
-        tar = tarfile.open(fileobj=file_to_upload, mode="w:xz")
-
-        click.echo("Compressing files...")
-        files_to_tar = list(file_names)
-        while files_to_tar:
-            file_name = files_to_tar.pop()
-            tarinfo = tar.gettarinfo(file_name)
-            click.echo(f"Compressing file {file_name}...")
-
-            if tarinfo.isreg():
-                with open(file_name, "rb") as file_obj:
-                    tar.addfile(tarinfo, file_obj)
-
-            elif tarinfo.isdir():
-                tar.addfile(tarinfo)
-                for sub_file in os.listdir(file_name):
-                    files_to_compress.append(sub_file)
-
-            else:
-                tarfile.addfile(tarinfo)
-
-        tar.close()
-        click.echo("Files compressed to a tarfile.")
-    else:
-        file_to_upload = open(file_names[0], mode="rb")
-        click.echo("Opened single file.")
+    file_to_upload = compress_files(file_names)
 
     part_size = part_size * 1024 * 1024
 
@@ -218,6 +199,112 @@ def upload(
     file_to_upload.close()
 
 
+def compress_files(file_names: List[pathlib.Path]):
+    """
+    file_names must only contain regular files and/or directories.
+    """
+    if any([f.is_symlink() for f in file_names]):
+        raise ValueError("file_names must not contain a symlink")
+
+    compressed_file = tempfile.TemporaryFile()
+    tar = tarfile.open(fileobj=compressed_file, mode="w:gz")
+
+    click.echo("Calculating total size of files to compress ...")
+    total_bytes_to_compress = sum(map(calculate_file_size, file_names))
+    click.echo(
+        f"Total bytes to compress is {human_readable_bytes(total_bytes_to_compress)}"
+    )
+    total_bytes_compressed = 0
+
+    files_to_compress = file_names
+    while files_to_compress:
+
+        file_name = files_to_compress.pop()
+        tarinfo = tar.gettarinfo(str(file_name))
+
+        if tarinfo.isreg():
+            file_size = file_name.stat().st_size
+            click.echo(
+                f"Compressing file {file_name} "
+                f"[{human_readable_bytes(file_name.stat().st_size)}] ..."
+            )
+            with open(file_name, "rb") as file_obj:
+                tar.addfile(tarinfo, file_obj)
+            total_bytes_compressed += file_name.stat().st_size
+            click.echo(
+                "{:.2%} complete ({} of {} bytes compressed)".format(
+                    total_bytes_compressed / total_bytes_to_compress,
+                    human_readable_bytes(total_bytes_compressed),
+                    human_readable_bytes(total_bytes_to_compress),
+                )
+            )
+
+        elif tarinfo.isdir():
+            tar.addfile(tarinfo)
+            for sub_file in file_name.iterdir():
+                files_to_compress.append(sub_file)
+
+        else:
+            tar.addfile(tarinfo)
+
+    tar.close()
+    compressed_file_size = compressed_file.seek(0, 2)
+    click.echo(
+        f"Compression complete. "
+        f"Compressed {human_readable_bytes(total_bytes_to_compress)} "
+        f"to {human_readable_bytes(compressed_file_size)}"
+    )
+
+    return compressed_file
+
+
+def human_readable_bytes(num, suffix="B"):
+    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
+
+
+def calculate_file_size(file_: pathlib.Path):
+    if not (file_.is_dir() or (file_.is_file() and not file_.is_symlink())):
+        raise ValueError("file_ must be a directory or a regular file.")
+
+    if file_.is_dir():
+        return calculate_directory_size(file_)
+
+    if file_.is_file():
+        return file_.stat().st_size
+
+
+def calculate_directory_size(directory: pathlib.Path):
+    """
+    Returns total size in bytes of all regular files recursively under
+    directory. Ignores symlinks.
+    """
+    if not directory.is_dir():
+        raise ValueError("{} is not a directory.".format(directory))
+
+    total_bytes = 0
+    directories_to_walk = [directory.resolve()]
+
+    while directories_to_walk:
+        next_directory = directories_to_walk.pop()
+
+        for file_ in next_directory.iterdir():
+
+            if file_.is_symlink():
+                continue
+
+            if file_.is_dir():
+                directories_to_walk.append(file_)
+
+            elif file_.is_file():
+                total_bytes += file_.stat().st_size
+
+    return total_bytes
+
+
 @click.command()
 @click.option(
     "-v",
@@ -261,11 +348,22 @@ def upload(
     help="Optional upload id, if provided then will " "resume upload.",
 )
 def upload_command(
-    vault_name, file_names, region, arc_desc, part_size, num_threads, upload_id
+    vault_name: str,
+    file_names: List[str],
+    region: str,
+    arc_desc: str,
+    part_size: int,
+    num_threads: int,
+    upload_id: str,
 ):
+    file_name_paths = list(map(pathlib.Path, file_names))
+
+    if any([f.is_symlink() for f in file_name_paths]):
+        raise ValueError("--file-name can not be a symlink.")
+
     return upload(
         vault_name,
-        file_names,
+        file_name_paths,
         region,
         arc_desc,
         part_size,
