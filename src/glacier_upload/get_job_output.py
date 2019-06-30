@@ -1,18 +1,29 @@
 import json
 import pathlib
 import tarfile
+import datetime
+import os
 
 import boto3
 import click
 
 
+def timed_print(msg):
+    now = datetime.datetime.now()
+    hms_string = f"{now.strftime('%H:%M:%S')}.{now.strftime('%f')[0:3]}"
+    click.echo(f"[{hms_string}] {msg}")
+
+
 def decompress_file(compressed_file: pathlib.Path, results_dir: pathlib.Path):
-    click.echo(f"Decompressing file {compressed_file} ...")
+    timed_print(f"Decompressing file {compressed_file} ...")
     with tarfile.open(compressed_file) as tar:
         tar.extractall(path=results_dir)
+    timed_print("Decompressing successful")
 
 
-def get_job_output(vault_name, job_id, file_name):
+def get_job_output(
+    vault_name: str, job_id: str, compressed_file_path: pathlib.Path
+):
     glacier = boto3.client("glacier")
 
     click.echo("Checking job status...")
@@ -22,7 +33,7 @@ def get_job_output(vault_name, job_id, file_name):
 
     if not response["Completed"]:
         click.echo("Exiting.")
-        return
+        return False
     else:
         click.echo("Retrieving job data...")
         response = glacier.get_job_output(vaultName=vault_name, jobId=job_id)
@@ -33,12 +44,9 @@ def get_job_output(vault_name, job_id, file_name):
         elif response["contentType"] == "text/csv":
             click.echo(response["body"].read())
         else:
-            with open(file_name, "xb") as file:
+            with open(str(compressed_file_path), "xb") as file:
                 file.write(response["body"].read())
-
-    file_name_path = pathlib.Path(file_name)
-    decompress_file(file_name_path, file_name_path.parent)
-    # TODO: delete compressed file
+        return True
 
 
 @click.command()
@@ -52,9 +60,16 @@ def get_job_output(vault_name, job_id, file_name):
 @click.option(
     "-f",
     "--file-name",
-    default="glacier_archive.tar.gz",
+    default="glacier_archive_retrieved_%Y_%m_%d_%H_%M_%S_%f.tar.gz",
     help="File name of archive to be saved, "
     "if the job is an archive-retrieval",
 )
 def get_job_output_command(vault_name, job_id, file_name):
-    return get_job_output(vault_name, job_id, file_name)
+    compressed_file_path = pathlib.Path(
+        "glacier_archive_retrieved_{}.tar.gz".format(
+            datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
+        )
+    )
+    if get_job_output(vault_name, job_id, compressed_file_path):
+        decompress_file(compressed_file_path, compressed_file_path.parent)
+        os.remove(str(compressed_file_path))

@@ -25,6 +25,8 @@ import tarfile
 import tempfile
 import threading
 import pathlib
+import datetime
+import typing
 from typing import List
 
 import boto3
@@ -33,6 +35,12 @@ import click
 MAX_ATTEMPTS = 10
 
 fileblock = threading.Lock()
+
+
+def timed_print(msg):
+    now = datetime.datetime.now()
+    hms_string = f"{now.strftime('%H:%M:%S')}.{now.strftime('%f')[0:3]}"
+    click.echo(f"[{hms_string}] {msg}")
 
 
 def calculate_total_tree_hash(list_of_checksums):
@@ -108,19 +116,30 @@ def calculate_file_size(file_: pathlib.Path):
         return file_.stat().st_size
 
 
-def compress_files(file_names: List[pathlib.Path]):
+def compress_files(
+    file_names: List[pathlib.Path], compressed_file_path: pathlib.Path
+):
     """
     file_names must only contain regular files and/or directories.
     """
     if any([f.is_symlink() for f in file_names]):
         raise ValueError("file_names must not contain a symlink")
 
-    compressed_file = tempfile.TemporaryFile()
-    tar = tarfile.open(fileobj=compressed_file, mode="w:gz")
+    try:
+        _compress_files(file_names, compressed_file_path)
+    except:
+        os.remove(compressed_file_path)
+        raise
 
-    click.echo("Calculating total size of files to compress ...")
+
+def _compress_files(
+    file_names: List[pathlib.Path], compressed_file_path: pathlib.Path
+):
+    tar = tarfile.open(name=str(compressed_file_path), mode="w:gz")
+
+    timed_print("Calculating total size of files to compress ...")
     total_bytes_to_compress = sum(map(calculate_file_size, file_names))
-    click.echo(
+    timed_print(
         f"Total bytes to compress is {human_readable_bytes(total_bytes_to_compress)}"
     )
     total_bytes_compressed = 0
@@ -133,14 +152,14 @@ def compress_files(file_names: List[pathlib.Path]):
 
         if tarinfo.isreg():
             file_size = file_name.stat().st_size
-            click.echo(
+            timed_print(
                 f"Compressing file {file_name} "
-                f"[{human_readable_bytes(file_name.stat().st_size)}] ..."
+                f"[{human_readable_bytes(file_size)}] ..."
             )
             with open(file_name, "rb") as file_obj:
                 tar.addfile(tarinfo, file_obj)
-            total_bytes_compressed += file_name.stat().st_size
-            click.echo(
+            total_bytes_compressed += file_size
+            timed_print(
                 "{:.2%} complete ({} of {} bytes compressed)".format(
                     total_bytes_compressed / total_bytes_to_compress,
                     human_readable_bytes(total_bytes_compressed),
@@ -157,8 +176,8 @@ def compress_files(file_names: List[pathlib.Path]):
             tar.addfile(tarinfo)
 
     tar.close()
-    compressed_file_size = compressed_file.seek(0, 2)
-    click.echo(
+    compressed_file_size = compressed_file_path.stat().st_size
+    timed_print(
         f"Compression complete. "
         f"Compressed {human_readable_bytes(total_bytes_to_compress)} "
         f"to {human_readable_bytes(compressed_file_size)} "
@@ -166,8 +185,6 @@ def compress_files(file_names: List[pathlib.Path]):
             compressed_file_size / total_bytes_to_compress
         )
     )
-
-    return compressed_file
 
 
 def upload_part(
@@ -191,7 +208,7 @@ def upload_part(
     part_num = byte_pos // part_size
     percentage = part_num / num_parts
 
-    click.echo(
+    timed_print(
         "Uploading part {0} of {1}... ({2:.2%})".format(
             part_num + 1, num_parts, percentage
         )
@@ -207,17 +224,17 @@ def upload_part(
             )
             checksum = calculate_tree_hash(part, part_size)
             if checksum != response["checksum"]:
-                click.echo("Checksums do not match. Will try again.")
+                timed_print("Checksums do not match. Will try again.")
                 continue
 
             # if everything worked, then we can break
             break
         except:
-            click.echo("Upload error:", sys.exc_info()[0])
-            click.echo("Trying again. Part {0}".format(part_num + 1))
+            timed_print("Upload error:", sys.exc_info()[0])
+            timed_print("Trying again. Part {0}".format(part_num + 1))
     else:
-        click.echo("After multiple attempts, still failed to upload part")
-        click.echo("Exiting.")
+        timed_print("After multiple attempts, still failed to upload part")
+        timed_print("Exiting.")
         sys.exit(1)
 
     del part
@@ -226,7 +243,7 @@ def upload_part(
 
 def upload(
     vault_name: str,
-    file_names: List[pathlib.Path],
+    file_to_upload: typing.io.BinaryIO,
     region: str,
     arc_desc: str,
     part_size: int,
@@ -242,14 +259,13 @@ def upload(
             "part-size must be more than 1 MB " "and less than 4096 MB"
         )
 
-    file_to_upload = compress_files(file_names)
-
     part_size = part_size * 1024 * 1024
 
     file_size = file_to_upload.seek(0, 2)
+    file_to_upload.seek(0)
 
     if file_size < 4096:
-        click.echo("File size is less than 4 MB. Uploading in one request...")
+        timed_print("File size is less than 4 MB. Uploading in one request...")
 
         response = glacier.upload_archive(
             vaultName=vault_name,
@@ -257,11 +273,11 @@ def upload(
             body=file_to_upload,
         )
 
-        click.echo("Uploaded.")
-        click.echo("Glacier tree hash: %s" % response["checksum"])
-        click.echo("Location: %s" % response["location"])
-        click.echo("Archive ID: %s" % response["archiveId"])
-        click.echo("Done.")
+        timed_print("Uploaded.")
+        timed_print("Glacier tree hash: %s" % response["checksum"])
+        timed_print("Location: %s" % response["location"])
+        timed_print("Archive ID: %s" % response["archiveId"])
+        timed_print("Done.")
         file_to_upload.close()
         return
 
@@ -269,7 +285,7 @@ def upload(
     list_of_checksums = []
 
     if upload_id is None:
-        click.echo("Initiating multipart upload...")
+        timed_print("Initiating multipart upload...")
         response = glacier.initiate_multipart_upload(
             vaultName=vault_name,
             archiveDescription=arc_desc,
@@ -282,20 +298,20 @@ def upload(
             list_of_checksums.append(None)
 
         num_parts = len(job_list)
-        click.echo(
+        timed_print(
             "File size is {} bytes. Will upload in {} parts.".format(
                 file_size, num_parts
             )
         )
     else:
-        click.echo("Resuming upload...")
+        timed_print("Resuming upload...")
 
-        click.echo("Fetching already uploaded parts...")
+        timed_print("Fetching already uploaded parts...")
         response = glacier.list_parts(vaultName=vault_name, uploadId=upload_id)
         parts = response["Parts"]
         part_size = response["PartSizeInBytes"]
         while "Marker" in response:
-            click.echo("Getting more parts...")
+            timed_print("Getting more parts...")
             response = glacier.list_parts(
                 vaultName=vault_name,
                 uploadId=upload_id,
@@ -320,7 +336,7 @@ def upload(
                     part_num = byte_start // part_size
                     list_of_checksums[part_num] = checksum
 
-    click.echo("Spawning threads...")
+    timed_print("Spawning threads...")
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=num_threads
     ) as executor:
@@ -349,9 +365,9 @@ def upload(
             for future in done:
                 e = future.exception()
                 if e is not None:
-                    click.echo("Exception occured: %r" % e)
-            click.echo("Upload not aborted. Upload id: %s" % upload_id)
-            click.echo("Exiting.")
+                    timed_print("Exception occured: %r" % e)
+            timed_print("Upload not aborted. Upload id: %s" % upload_id)
+            timed_print("Exiting.")
             file_to_upload.close()
             sys.exit(1)
         else:
@@ -361,30 +377,30 @@ def upload(
                 list_of_checksums[job_index] = future.result()
 
     if len(list_of_checksums) != num_parts:
-        click.echo("List of checksums incomplete. Recalculating...")
+        timed_print("List of checksums incomplete. Recalculating...")
         list_of_checksums = []
         for byte_pos in range(0, file_size, part_size):
             part_num = int(byte_pos / part_size)
-            click.echo("Checksum %s of %s..." % (part_num + 1, num_parts))
+            timed_print("Checksum %s of %s..." % (part_num + 1, num_parts))
             file_to_upload.seek(byte_pos)
             part = file_to_upload.read(part_size)
             list_of_checksums.append(calculate_tree_hash(part, part_size))
 
     total_tree_hash = calculate_total_tree_hash(list_of_checksums)
 
-    click.echo("Completing multipart upload...")
+    timed_print("Completing multipart upload...")
     response = glacier.complete_multipart_upload(
         vaultName=vault_name,
         uploadId=upload_id,
         archiveSize=str(file_size),
         checksum=total_tree_hash,
     )
-    click.echo("Upload successful.")
-    click.echo("Calculated total tree hash: %s" % total_tree_hash)
-    click.echo("Glacier total tree hash: %s" % response["checksum"])
-    click.echo("Location: %s" % response["location"])
-    click.echo("Archive ID: %s" % response["archiveId"])
-    click.echo("Done.")
+    timed_print("Upload successful.")
+    timed_print("Calculated total tree hash: %s" % total_tree_hash)
+    timed_print("Glacier total tree hash: %s" % response["checksum"])
+    timed_print("Location: %s" % response["location"])
+    timed_print("Archive ID: %s" % response["archiveId"])
+    timed_print("Done.")
     file_to_upload.close()
 
 
@@ -432,27 +448,38 @@ def upload(
 )
 def upload_command(
     vault_name: str,
-    file_names: List[str],
+    file_name: List[str],
     region: str,
     arc_desc: str,
     part_size: int,
     num_threads: int,
     upload_id: str,
 ):
+    file_names = file_name
     file_name_paths = list(map(pathlib.Path, file_names))
 
     if any([f.is_symlink() for f in file_name_paths]):
         raise ValueError("--file-name can not be a symlink.")
 
-    return upload(
-        vault_name,
-        file_name_paths,
-        region,
-        arc_desc,
-        part_size,
-        num_threads,
-        upload_id,
+    compressed_file_path = pathlib.Path(
+        os.getcwd()
+    ) / "glacier_archive_created_{}.tar.gz".format(
+        datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
     )
+    compress_files(file_name_paths, compressed_file_path)
+
+    with open(compressed_file_path, "rb") as file_to_upload:
+        upload(
+            vault_name,
+            file_to_upload,
+            region,
+            arc_desc,
+            part_size,
+            num_threads,
+            upload_id,
+        )
+
+    os.remove(compressed_file_path)
 
 
 if __name__ == "__main__":
