@@ -35,6 +35,195 @@ MAX_ATTEMPTS = 10
 fileblock = threading.Lock()
 
 
+def calculate_total_tree_hash(list_of_checksums):
+    tree = list_of_checksums[:]
+    while len(tree) > 1:
+        parent = []
+        for i in range(0, len(tree), 2):
+            if i < len(tree) - 1:
+                part1 = binascii.unhexlify(tree[i])
+                part2 = binascii.unhexlify(tree[i + 1])
+                parent.append(hashlib.sha256(part1 + part2).hexdigest())
+            else:
+                parent.append(tree[i])
+        tree = parent
+    return tree[0]
+
+
+def human_readable_bytes(num, suffix="B"):
+    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
+
+
+def calculate_tree_hash(part, part_size):
+    checksums = []
+    upper_bound = min(len(part), part_size)
+    step = 1024 * 1024  # 1 MB
+    for chunk_pos in range(0, upper_bound, step):
+        chunk = part[chunk_pos : chunk_pos + step]
+        checksums.append(hashlib.sha256(chunk).hexdigest())
+        del chunk
+    return calculate_total_tree_hash(checksums)
+
+
+def calculate_directory_size(directory: pathlib.Path):
+    """
+    Returns total size in bytes of all regular files recursively under
+    directory. Ignores symlinks.
+    """
+    if not directory.is_dir():
+        raise ValueError("{} is not a directory.".format(directory))
+
+    total_bytes = 0
+    directories_to_walk = [directory.resolve()]
+
+    while directories_to_walk:
+        next_directory = directories_to_walk.pop()
+
+        for file_ in next_directory.iterdir():
+
+            if file_.is_symlink():
+                continue
+
+            if file_.is_dir():
+                directories_to_walk.append(file_)
+
+            elif file_.is_file():
+                total_bytes += file_.stat().st_size
+
+    return total_bytes
+
+
+def calculate_file_size(file_: pathlib.Path):
+    if not (file_.is_dir() or (file_.is_file() and not file_.is_symlink())):
+        raise ValueError("file_ must be a directory or a regular file.")
+
+    if file_.is_dir():
+        return calculate_directory_size(file_)
+
+    if file_.is_file():
+        return file_.stat().st_size
+
+
+def compress_files(file_names: List[pathlib.Path]):
+    """
+    file_names must only contain regular files and/or directories.
+    """
+    if any([f.is_symlink() for f in file_names]):
+        raise ValueError("file_names must not contain a symlink")
+
+    compressed_file = tempfile.TemporaryFile()
+    tar = tarfile.open(fileobj=compressed_file, mode="w:gz")
+
+    click.echo("Calculating total size of files to compress ...")
+    total_bytes_to_compress = sum(map(calculate_file_size, file_names))
+    click.echo(
+        f"Total bytes to compress is {human_readable_bytes(total_bytes_to_compress)}"
+    )
+    total_bytes_compressed = 0
+
+    files_to_compress = file_names
+    while files_to_compress:
+
+        file_name = files_to_compress.pop()
+        tarinfo = tar.gettarinfo(str(file_name))
+
+        if tarinfo.isreg():
+            file_size = file_name.stat().st_size
+            click.echo(
+                f"Compressing file {file_name} "
+                f"[{human_readable_bytes(file_name.stat().st_size)}] ..."
+            )
+            with open(file_name, "rb") as file_obj:
+                tar.addfile(tarinfo, file_obj)
+            total_bytes_compressed += file_name.stat().st_size
+            click.echo(
+                "{:.2%} complete ({} of {} bytes compressed)".format(
+                    total_bytes_compressed / total_bytes_to_compress,
+                    human_readable_bytes(total_bytes_compressed),
+                    human_readable_bytes(total_bytes_to_compress),
+                )
+            )
+
+        elif tarinfo.isdir():
+            tar.addfile(tarinfo)
+            for sub_file in file_name.iterdir():
+                files_to_compress.append(sub_file)
+
+        else:
+            tar.addfile(tarinfo)
+
+    tar.close()
+    compressed_file_size = compressed_file.seek(0, 2)
+    click.echo(
+        f"Compression complete. "
+        f"Compressed {human_readable_bytes(total_bytes_to_compress)} "
+        f"to {human_readable_bytes(compressed_file_size)} "
+        + "(original size reduced to {:.2%})".format(
+            compressed_file_size / total_bytes_to_compress
+        )
+    )
+
+    return compressed_file
+
+
+def upload_part(
+    byte_pos,
+    vault_name,
+    upload_id,
+    part_size,
+    fileobj,
+    file_size,
+    num_parts,
+    glacier,
+):
+    fileblock.acquire()
+    fileobj.seek(byte_pos)
+    part = fileobj.read(part_size)
+    fileblock.release()
+
+    range_header = "bytes {}-{}/{}".format(
+        byte_pos, byte_pos + len(part) - 1, file_size
+    )
+    part_num = byte_pos // part_size
+    percentage = part_num / num_parts
+
+    click.echo(
+        "Uploading part {0} of {1}... ({2:.2%})".format(
+            part_num + 1, num_parts, percentage
+        )
+    )
+
+    for i in range(MAX_ATTEMPTS):
+        try:
+            response = glacier.upload_multipart_part(
+                vaultName=vault_name,
+                uploadId=upload_id,
+                range=range_header,
+                body=part,
+            )
+            checksum = calculate_tree_hash(part, part_size)
+            if checksum != response["checksum"]:
+                click.echo("Checksums do not match. Will try again.")
+                continue
+
+            # if everything worked, then we can break
+            break
+        except:
+            click.echo("Upload error:", sys.exc_info()[0])
+            click.echo("Trying again. Part {0}".format(part_num + 1))
+    else:
+        click.echo("After multiple attempts, still failed to upload part")
+        click.echo("Exiting.")
+        sys.exit(1)
+
+    del part
+    return checksum
+
+
 def upload(
     vault_name: str,
     file_names: List[pathlib.Path],
@@ -199,115 +388,6 @@ def upload(
     file_to_upload.close()
 
 
-def compress_files(file_names: List[pathlib.Path]):
-    """
-    file_names must only contain regular files and/or directories.
-    """
-    if any([f.is_symlink() for f in file_names]):
-        raise ValueError("file_names must not contain a symlink")
-
-    compressed_file = tempfile.TemporaryFile()
-    tar = tarfile.open(fileobj=compressed_file, mode="w:gz")
-
-    click.echo("Calculating total size of files to compress ...")
-    total_bytes_to_compress = sum(map(calculate_file_size, file_names))
-    click.echo(
-        f"Total bytes to compress is {human_readable_bytes(total_bytes_to_compress)}"
-    )
-    total_bytes_compressed = 0
-
-    files_to_compress = file_names
-    while files_to_compress:
-
-        file_name = files_to_compress.pop()
-        tarinfo = tar.gettarinfo(str(file_name))
-
-        if tarinfo.isreg():
-            file_size = file_name.stat().st_size
-            click.echo(
-                f"Compressing file {file_name} "
-                f"[{human_readable_bytes(file_name.stat().st_size)}] ..."
-            )
-            with open(file_name, "rb") as file_obj:
-                tar.addfile(tarinfo, file_obj)
-            total_bytes_compressed += file_name.stat().st_size
-            click.echo(
-                "{:.2%} complete ({} of {} bytes compressed)".format(
-                    total_bytes_compressed / total_bytes_to_compress,
-                    human_readable_bytes(total_bytes_compressed),
-                    human_readable_bytes(total_bytes_to_compress),
-                )
-            )
-
-        elif tarinfo.isdir():
-            tar.addfile(tarinfo)
-            for sub_file in file_name.iterdir():
-                files_to_compress.append(sub_file)
-
-        else:
-            tar.addfile(tarinfo)
-
-    tar.close()
-    compressed_file_size = compressed_file.seek(0, 2)
-    click.echo(
-        f"Compression complete. "
-        f"Compressed {human_readable_bytes(total_bytes_to_compress)} "
-        f"to {human_readable_bytes(compressed_file_size)} "
-        + "(original size reduced to {:.2%})".format(
-            compressed_file_size / total_bytes_to_compress
-        )
-    )
-
-    return compressed_file
-
-
-def human_readable_bytes(num, suffix="B"):
-    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
-        if abs(num) < 1024.0:
-            return f"{num:3.1f}{unit}{suffix}"
-        num /= 1024.0
-    return f"{num:.1f}Yi{suffix}"
-
-
-def calculate_file_size(file_: pathlib.Path):
-    if not (file_.is_dir() or (file_.is_file() and not file_.is_symlink())):
-        raise ValueError("file_ must be a directory or a regular file.")
-
-    if file_.is_dir():
-        return calculate_directory_size(file_)
-
-    if file_.is_file():
-        return file_.stat().st_size
-
-
-def calculate_directory_size(directory: pathlib.Path):
-    """
-    Returns total size in bytes of all regular files recursively under
-    directory. Ignores symlinks.
-    """
-    if not directory.is_dir():
-        raise ValueError("{} is not a directory.".format(directory))
-
-    total_bytes = 0
-    directories_to_walk = [directory.resolve()]
-
-    while directories_to_walk:
-        next_directory = directories_to_walk.pop()
-
-        for file_ in next_directory.iterdir():
-
-            if file_.is_symlink():
-                continue
-
-            if file_.is_dir():
-                directories_to_walk.append(file_)
-
-            elif file_.is_file():
-                total_bytes += file_.stat().st_size
-
-    return total_bytes
-
-
 @click.command()
 @click.option(
     "-v",
@@ -373,86 +453,6 @@ def upload_command(
         num_threads,
         upload_id,
     )
-
-
-def upload_part(
-    byte_pos,
-    vault_name,
-    upload_id,
-    part_size,
-    fileobj,
-    file_size,
-    num_parts,
-    glacier,
-):
-    fileblock.acquire()
-    fileobj.seek(byte_pos)
-    part = fileobj.read(part_size)
-    fileblock.release()
-
-    range_header = "bytes {}-{}/{}".format(
-        byte_pos, byte_pos + len(part) - 1, file_size
-    )
-    part_num = byte_pos // part_size
-    percentage = part_num / num_parts
-
-    click.echo(
-        "Uploading part {0} of {1}... ({2:.2%})".format(
-            part_num + 1, num_parts, percentage
-        )
-    )
-
-    for i in range(MAX_ATTEMPTS):
-        try:
-            response = glacier.upload_multipart_part(
-                vaultName=vault_name,
-                uploadId=upload_id,
-                range=range_header,
-                body=part,
-            )
-            checksum = calculate_tree_hash(part, part_size)
-            if checksum != response["checksum"]:
-                click.echo("Checksums do not match. Will try again.")
-                continue
-
-            # if everything worked, then we can break
-            break
-        except:
-            click.echo("Upload error:", sys.exc_info()[0])
-            click.echo("Trying again. Part {0}".format(part_num + 1))
-    else:
-        click.echo("After multiple attempts, still failed to upload part")
-        click.echo("Exiting.")
-        sys.exit(1)
-
-    del part
-    return checksum
-
-
-def calculate_tree_hash(part, part_size):
-    checksums = []
-    upper_bound = min(len(part), part_size)
-    step = 1024 * 1024  # 1 MB
-    for chunk_pos in range(0, upper_bound, step):
-        chunk = part[chunk_pos : chunk_pos + step]
-        checksums.append(hashlib.sha256(chunk).hexdigest())
-        del chunk
-    return calculate_total_tree_hash(checksums)
-
-
-def calculate_total_tree_hash(list_of_checksums):
-    tree = list_of_checksums[:]
-    while len(tree) > 1:
-        parent = []
-        for i in range(0, len(tree), 2):
-            if i < len(tree) - 1:
-                part1 = binascii.unhexlify(tree[i])
-                part2 = binascii.unhexlify(tree[i + 1])
-                parent.append(hashlib.sha256(part1 + part2).hexdigest())
-            else:
-                parent.append(tree[i])
-        tree = parent
-    return tree[0]
 
 
 if __name__ == "__main__":
