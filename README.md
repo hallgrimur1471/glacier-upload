@@ -11,6 +11,7 @@
 - [ ] Add option to choose archive retrieval speed
 - [ ] AWS SNS integration
 - [ ] Add more programmatical management/storage of Archive IDs
+- [ ] Warn user when request exceeds [AWS Glacier core specifications](https://docs.aws.amazon.com/amazonglacier/latest/dev/uploading-archive-mpu.html)
 
 My plan is to hack on this in on branch 'hallgrimur1471' and then afterwards hopefully send pull requests from feature branches based on 'develop' branch to tbumi's repository.
 

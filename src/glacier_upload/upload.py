@@ -43,6 +43,20 @@ def timed_print(msg):
     click.echo(f"[{hms_string}] {msg}")
 
 
+def is_regular_file(file_path: pathlib.Path):
+    if file_path.is_file() and not file_path.is_symlink():
+        return True
+    return False
+
+
+def human_readable_bytes(num, suffix="B"):
+    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
+
+
 def calculate_total_tree_hash(list_of_checksums):
     tree = list_of_checksums[:]
     while len(tree) > 1:
@@ -56,14 +70,6 @@ def calculate_total_tree_hash(list_of_checksums):
                 parent.append(tree[i])
         tree = parent
     return tree[0]
-
-
-def human_readable_bytes(num, suffix="B"):
-    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
-        if abs(num) < 1024.0:
-            return f"{num:3.1f}{unit}{suffix}"
-        num /= 1024.0
-    return f"{num:.1f}Yi{suffix}"
 
 
 def calculate_tree_hash(part, part_size):
@@ -418,6 +424,14 @@ def upload(
     multiple=True,
     help="The file or directory name on your local " "filesystem to upload",
 )
+@click.option(
+    "--do-not-compress",
+    is_flag=True,
+    help=(
+        "Don't compress file before uploading. "
+        + "Requires --file-name to be a regular file"
+    ),
+)
 @click.option("-r", "--region", help="The name of the region to upload to")
 @click.option(
     "-d",
@@ -449,6 +463,7 @@ def upload(
 def upload_command(
     vault_name: str,
     file_name: List[str],
+    do_not_compress: bool,
     region: str,
     arc_desc: str,
     part_size: int,
@@ -461,14 +476,30 @@ def upload_command(
     if any([f.is_symlink() for f in file_name_paths]):
         raise ValueError("--file-name can not be a symlink.")
 
-    compressed_file_path = pathlib.Path(
-        os.getcwd()
-    ) / "glacier_archive_created_{}.tar.gz".format(
-        datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
-    )
-    compress_files(file_name_paths, compressed_file_path)
+    if do_not_compress and len(file_name_paths) > 1:
+        raise ValueError(
+            "There may only be single --file-name when "
+            + "--do-not-compress is specified."
+        )
+    if do_not_compress and not is_regular_file(file_name_paths[0]):
+        raise ValueError(
+            "Since --do-not-compress is specified, --file-name must be a "
+            + "regular file."
+        )
 
-    with open(compressed_file_path, "rb") as file_to_upload:
+    file_path_to_upload = None
+    if do_not_compress:
+        file_path_to_upload = file_name_paths[0]
+    else:
+        compressed_file_path = pathlib.Path(
+            os.getcwd()
+        ) / "glacier_archive_created_{}.tar.gz".format(
+            datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
+        )
+        compress_files(file_name_paths, compressed_file_path)
+        file_path_to_upload = compressed_file_path
+
+    with open(file_path_to_upload, "rb") as file_to_upload:
         upload(
             vault_name,
             file_to_upload,
@@ -479,7 +510,11 @@ def upload_command(
             upload_id,
         )
 
-    os.remove(compressed_file_path)
+    if do_not_compress:
+        pass
+    else:
+        # Remove the compressed file
+        os.remove(file_path_to_upload)
 
 
 if __name__ == "__main__":
