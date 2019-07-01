@@ -236,7 +236,7 @@ def upload_part(
             # if everything worked, then we can break
             break
         except:
-            timed_print("Upload error:", sys.exc_info()[0])
+            timed_print("Upload error: {}".format(sys.exc_info()[0]))
             timed_print("Trying again. Part {0}".format(part_num + 1))
     else:
         timed_print("After multiple attempts, still failed to upload part")
